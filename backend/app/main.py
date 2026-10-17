@@ -209,6 +209,12 @@ class LoginBody(BaseModel):
 
 
 
+
+@app.get("/")
+
+async def root(request: Request):
+
+          return {"message": "Hello World"}
 @app.middleware("http")
 
 
