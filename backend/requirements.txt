@@ -11,3 +11,4 @@ python-jose[cryptography]
 pwdlib[argon2]
 azure-storage-blob
 azure-identity
+numpy
