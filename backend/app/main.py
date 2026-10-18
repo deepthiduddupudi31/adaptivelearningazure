@@ -217,6 +217,8 @@ async def require_jwt_for_application_routes(request: Request, call_next):
 
                               "https://adaptivelearning-b7qv2s0ji.vercel.app/"
 
+                              "https://agreeable-bush-05a1ee100.2.azurestaticapps.net/"
+
                     }
 
                     if origin in allowed_origins:
@@ -248,6 +250,8 @@ app.add_middleware(
                     "https://adaptivelearning-psi.vercel.app"
 
                     "https://adaptivelearning-b7qv2s0ji.vercel.app/"
+
+                    "https://agreeable-bush-05a1ee100.2.azurestaticapps.net/"
 
           ],
 
