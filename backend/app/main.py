@@ -213,9 +213,9 @@ async def require_jwt_for_application_routes(request: Request, call_next):
 
                               "http://127.0.0.1:5173",
 
-                              "https://adaptivelearning-psi.vercel.app"
+                              "https://adaptivelearning-psi.vercel.app",
 
-                              "https://adaptivelearning-b7qv2s0ji.vercel.app/"
+                              "https://adaptivelearning-b7qv2s0ji.vercel.app/",
 
                               "https://agreeable-bush-05a1ee100.2.azurestaticapps.net/"
 
@@ -247,9 +247,9 @@ app.add_middleware(
 
                     "http://127.0.0.1:5173",
 
-                    "https://adaptivelearning-psi.vercel.app"
+                    "https://adaptivelearning-psi.vercel.app",
 
-                    "https://adaptivelearning-b7qv2s0ji.vercel.app/"
+                    "https://adaptivelearning-b7qv2s0ji.vercel.app/",
 
                     "https://agreeable-bush-05a1ee100.2.azurestaticapps.net/"
 
