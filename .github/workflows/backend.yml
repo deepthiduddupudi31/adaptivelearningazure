@@ -1,0 +1,74 @@
+name: Build and Deploy FastAPI Backend to Azure
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: adaptive-learning-backend
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+          
+      
+      - name: Sign in to Azure Container Registry
+        run: |
+          ACR_TOKEN=$(az acr login \
+            --name "${{ secrets.ACR_NAME }}" \
+            --expose-token \
+            --query accessToken \
+            --output tsv)
+
+          echo "$ACR_TOKEN" | docker login \
+            "${{ secrets.ACR_LOGIN_SERVER }}" \
+            --username 00000000-0000-0000-0000-000000000000 \
+            --password-stdin
+
+      
+      - name: Build and push backend Docker image
+        run: |
+          docker build \
+            -f backend/Dockerfile \
+            -t "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" \
+            -t "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest" \
+            backend
+
+          docker push "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          docker push "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest"
+
+
+    
+      - name: Configure Azure Web App to use the new image
+        run: >
+          az webapp config container set
+          --name "${{ secrets.AZURE_WEBAPP_NAME }}"
+          --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}"
+          --docker-custom-image-name "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          --docker-registry-server-url "https://${{ secrets.ACR_LOGIN_SERVER }}"
+
+      - name: Restart Azure Web App
+        run: >
+          az webapp restart
+          --name "${{ secrets.AZURE_WEBAPP_NAME }}"
+          --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}"
