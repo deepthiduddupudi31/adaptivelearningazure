@@ -1,60 +1,34 @@
+import os
 from contextlib import asynccontextmanager
-
-
 
 from datetime import datetime, timezone
 
-
-
 from .rag import ingest_pdf, retrieve_context, backfill_missing_topics
-
-
-
 from uuid import UUID, uuid4
-
-
+from azure.core.exceptions import AzureError
+from azure.identity import DefaultAzureCredential
+from azure.storage.blob import BlobServiceClient, ContentSettings
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 
-
-
 from fastapi.middleware.cors import CORSMiddleware
-
-
 
 from pydantic import BaseModel, Field
 
 from psycopg.types.json import Jsonb
 
-
-
 from .config import settings
 
-
-
 from .db import init_db, get_connection
-
-
 
 from .ai import generate_questions, tutor_answer
 
 
-
-from .rag import ingest_pdf, retrieve_context
-
-
-
 from .auth import hash_password, verify_password, create_access_token, current_user_from_request
-
-
 
 import re
 
-
-
 from fastapi.security import HTTPBearer
-
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -123,25 +97,32 @@ async def lifespan(app: FastAPI):
         print(f"Database initialization failed: {exc}")
     yield
 
+AZURE_STORAGE_ACCOUNT_NAME = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
+AZURE_STORAGE_CONTAINER_NAME = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "study-documents")
+
+
+def get_blob_container():
+    """Return the private Azure Blob Storage container using managed identity."""
+    if not AZURE_STORAGE_ACCOUNT_NAME:
+        raise RuntimeError("AZURE_STORAGE_ACCOUNT_NAME is missing.")
+
+    account_url = f"https://{AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net"
+    credential = DefaultAzureCredential()
+    service = BlobServiceClient(account_url=account_url, credential=credential)
+    return service.get_container_client(AZURE_STORAGE_CONTAINER_NAME)
+
+
 app = FastAPI(title="Adaptive Learning Platform API", lifespan=lifespan)
 
-
-
 bearer_scheme = HTTPBearer(auto_error=False)
-
-
 
 def custom_openapi():
 
           from fastapi.openapi.utils import get_openapi
 
-
-
           if app.openapi_schema:
 
                     return app.openapi_schema
-
-
 
           schema = get_openapi(
 
@@ -152,8 +133,6 @@ def custom_openapi():
                     routes=app.routes,
 
           )
-
-
 
           schema.setdefault("components", {}).setdefault("securitySchemes", {})[
 
@@ -169,46 +148,25 @@ def custom_openapi():
 
           }
 
-
-
           app.openapi_schema = schema
 
           return app.openapi_schema
 
-
-
 app.openapi = custom_openapi
-
-
 
 class SignupBody(BaseModel):
 
-
-
           full_name: str = Field(min_length=2, max_length=100)
 
-
-
           email: str = Field(min_length=5, max_length=254)
-
-
 
           password: str = Field(min_length=8, max_length=128)
 
-
-
 class LoginBody(BaseModel):
-
-
 
           email: str = Field(min_length=5, max_length=254)
 
-
-
           password: str = Field(min_length=1, max_length=128)
-
-
-
 
 @app.get("/")
 
@@ -217,79 +175,41 @@ async def root(request: Request):
           return {"message": "Hello World"}
 @app.middleware("http")
 
-
-
 async def require_jwt_for_application_routes(request: Request, call_next):
-
-
 
           path = request.url.path
 
-
-
           public_paths = {"/health", "/auth/signup", "/auth/login", "/openapi.json"}
-
-
 
           if (request.method == "OPTIONS" or path in public_paths or
 
-
-
                     path.startswith("/docs") or path.startswith("/redoc")):
-
-
 
                     return await call_next(request)
 
-
-
           try:
-
-
 
                     request.state.user = current_user_from_request(request)
 
-
-
           except HTTPException as exc:
-
-
 
                     from starlette.responses import JSONResponse
 
-
-
                     response = JSONResponse(
-
-
 
                               status_code=exc.status_code,
 
-
-
                               content={"detail": exc.detail},
-
-
 
                               headers={"WWW-Authenticate": "Bearer"},
 
-
-
                     )
-
-
 
                     origin = request.headers.get("origin")
 
-
-
                     allowed_origins = {
 
-
-
                               "http://localhost:5173",
-
-
 
                               "http://127.0.0.1:5173",
 
@@ -297,59 +217,31 @@ async def require_jwt_for_application_routes(request: Request, call_next):
 
                               "https://adaptivelearning-b7qv2s0ji.vercel.app/"
 
-
-
                     }
-
-
 
                     if origin in allowed_origins:
 
-
-
                               response.headers["Access-Control-Allow-Origin"] = origin
-
-
 
                               response.headers["Access-Control-Allow-Credentials"] = "true"
 
-
-
                               response.headers["Vary"] = "Origin"
-
-
 
                     return response
 
-
-
           return await call_next(request)
-
-
 
 # Register CORS after the custom HTTP middleware so CORS wraps its responses,
 
-
-
 # including authentication errors returned as JSONResponse.
-
-
 
 app.add_middleware(
 
-
-
           CORSMiddleware,
-
-
 
           allow_origins=[
 
-
-
                     "http://localhost:5173",
-
-
 
                     "http://127.0.0.1:5173",
 
@@ -357,823 +249,414 @@ app.add_middleware(
 
                     "https://adaptivelearning-b7qv2s0ji.vercel.app/"
 
-
-
           ],
-
-
 
           allow_credentials=True,
 
-
-
           allow_methods=["*"],
-
-
 
           allow_headers=["*"],
 
-
-
 )
-
-
 
 @app.post("/auth/signup")
 
-
-
 def signup(body: SignupBody):
-
-
 
           full_name = body.full_name.strip()
 
-
-
           email = body.email.strip().lower()
-
-
 
           if not full_name:
 
-
-
                     raise HTTPException(422, "Please enter your name")
-
-
 
           if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
 
-
-
                     raise HTTPException(422, "Enter a valid email address")
-
-
 
           user_id = uuid4()
 
-
-
           with get_connection() as connection:
-
-
 
                     if connection.execute("SELECT 1 FROM users WHERE email=%s", (email,)).fetchone():
 
-
-
                               raise HTTPException(409, "An account with this email already exists. Please log in.")
-
-
 
                     connection.execute(
 
-
-
                               "INSERT INTO users(id, full_name, email, password_hash) VALUES (%s,%s,%s,%s)",
-
-
 
                               (user_id, full_name, email, hash_password(body.password)),
 
-
-
                     )
-
-
 
                     connection.commit()
 
-
-
           token = create_access_token(str(user_id), email)
-
-
 
           return {"access_token": token, "token_type": "bearer", "user": {"id": str(user_id), "full_name": full_name, "email": email}}
 
-
-
 @app.post("/auth/login")
-
-
 
 def login(body: LoginBody):
 
-
-
           email = body.email.strip().lower()
-
-
 
           with get_connection() as connection:
 
-
-
                     user = connection.execute(
-
-
 
                               "SELECT id, full_name, email, password_hash FROM users WHERE email=%s", (email,)
 
-
-
                     ).fetchone()
-
-
 
           if not user or not verify_password(body.password, user["password_hash"]):
 
-
-
                     raise HTTPException(401, "Incorrect email or password")
-
-
 
           token = create_access_token(str(user["id"]), user["email"])
 
-
-
           return {"access_token": token, "token_type": "bearer", "user": {"id": str(user["id"]), "full_name": user["full_name"], "email": user["email"]}}
-
-
 
 @app.get("/auth/me")
 
-
-
 def get_me(request: Request):
-
-
 
           return request.state.user
 
-
-
 class StartBody(BaseModel):
-
-
 
           student_name: str = Field(min_length=1, max_length=80)
 
-
-
           subject: str
-
-
 
           duration_minutes: int = Field(default=20, ge=1, le=180)
 
-
-
 class AnswerBody(BaseModel):
-
-
 
           question_id: str
 
-
-
           answer: str
-
-
 
 class GenerateBody(BaseModel):
 
-
-
           subject: str
-
-
 
           topic: str | None = None
 
-
-
           difficulty: str = "medium"
 
-
-
           context: str | None = None
-
-
 
           document_id: str | None = None
           count: int = Field(default=5, ge=1, le=100)
 
-
 class TutorBody(BaseModel):
-
-
 
           question: str
 
-
-
 @app.get("/health")
-
-
 
 def health():
 
-
-
           try:
-
-
 
                     with get_connection() as c:
 
-
-
                               c.execute("SELECT 1")
-
-
 
                     return {"status": "ok", "database": "connected"}
 
-
-
           except Exception as exc:
-
-
 
                     raise HTTPException(503, f"Database unavailable: {exc}")
 
-
-
 @app.post("/exams/start")
-
-
 
 def start_exam(b: StartBody):
 
-
-
           sid, eid = uuid4(), uuid4()
 
-
-
           with get_connection() as c:
-
-
 
                     row = c.execute(
 
-
-
                               "SELECT id FROM students WHERE display_name=%s ORDER BY created_at LIMIT 1",
-
-
 
                               (b.student_name,),
 
-
-
                     ).fetchone()
-
-
 
                     student_id = row["id"] if row else sid
 
-
-
                     if not row:
 
-
-
                               c.execute(
-
-
 
                                         "INSERT INTO students(id,display_name) VALUES (%s,%s)",
 
-
-
                                         (student_id, b.student_name),
-
-
 
                               )
 
-
-
                     c.execute(
-
-
 
                               "INSERT INTO exam_sessions(id,student_id,subject,duration_seconds) VALUES (%s,%s,%s,%s)",
 
-
-
                               (eid, student_id, b.subject, b.duration_minutes * 60),
-
-
 
                     )
 
-
-
                     c.commit()
 
-
-
           return {
-
-
 
                     "session_id": str(eid),
 
-
-
                     "duration_seconds": b.duration_minutes * 60,
-
-
 
                     "subject": b.subject,
 
-
-
           }
-
-
 
 @app.post("/exams/{sid}/next-question")
 
-
-
 def next_question(sid: str):
-
-
 
           with get_connection() as c:
 
-
-
                     session = c.execute(
-
-
 
                               "SELECT * FROM exam_sessions WHERE id=%s", (sid,)
 
-
-
                     ).fetchone()
-
-
 
                     if not session:
 
-
-
                               raise HTTPException(404, "Exam session not found")
-
-
 
                     if session["status"] != "active":
 
-
-
                               raise HTTPException(400, "Exam is not active")
-
-
 
                     elapsed = (datetime.now(timezone.utc) - session["started_at"]).total_seconds()
 
-
-
                     if elapsed >= session["duration_seconds"]:
-
-
 
                               c.execute(
 
-
-
                                         "UPDATE exam_sessions SET status='expired',ended_at=NOW() WHERE id=%s",
-
-
 
                                         (sid,),
 
-
-
                               )
-
-
 
                               c.commit()
 
-
-
                               raise HTTPException(410, "Exam time expired")
-
-
 
                     stats = c.execute(
 
-
-
                               "SELECT COUNT(*) AS n, COALESCE(AVG(is_correct::int),0) AS accuracy FROM responses WHERE session_id=%s",
-
-
 
                               (sid,),
 
-
-
                     ).fetchone()
-
-
 
                     diff = "medium" if stats["n"] < 2 else (
 
-
-
                               "hard" if float(stats["accuracy"]) >= 0.8 else
-
-
 
                               ("easy" if float(stats["accuracy"]) < 0.5 else "medium")
 
-
-
                     )
-
-
 
                     q = generate_question(session["subject"], session["subject"], diff)
 
-
-
                     qid = uuid4()
-
-
 
                     pos = stats["n"] + 1
 
-
-
                     c.execute(
-
-
 
                               """INSERT INTO questions
 
-
-
                               (id,subject,topic,difficulty,question_text,options,correct_answer,explanation)
-
-
 
                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
 
-
-
                               (qid, q["subject"], q["topic"], q["difficulty"], q["question"],
-
-
 
                                   q["options"], q["correct_answer"], q["explanation"]),
 
-
-
                     )
 
-
-
                     c.execute(
-
-
 
                               "INSERT INTO exam_questions(session_id,question_id,position) VALUES (%s,%s,%s)",
 
-
-
                               (sid, qid, pos),
-
-
 
                     )
 
-
-
                     c.commit()
 
-
-
           return {
-
-
 
                     "id": str(qid), "subject": q["subject"], "topic": q["topic"],
 
-
-
                     "difficulty": q["difficulty"], "question": q["question"],
-
-
 
                     "options": q["options"], "position": pos,
 
-
-
                     "remaining_seconds": max(0, int(session["duration_seconds"] - elapsed)),
 
-
-
           }
-
-
 
 @app.post("/exams/{sid}/answer")
 
-
-
 def submit_answer(sid: str, b: AnswerBody):
-
-
 
           with get_connection() as c:
 
-
-
                     session = c.execute(
-
-
 
                               "SELECT * FROM exam_sessions WHERE id=%s", (sid,)
 
-
-
                     ).fetchone()
-
-
 
                     if not session or session["status"] != "active":
 
-
-
                               raise HTTPException(400, "Exam is not active")
-
-
 
                     elapsed = (datetime.now(timezone.utc) - session["started_at"]).total_seconds()
 
-
-
                     if elapsed >= session["duration_seconds"]:
-
-
 
                               raise HTTPException(410, "Exam time expired")
 
-
-
                     assigned = c.execute(
-
-
 
                               "SELECT 1 FROM exam_questions WHERE session_id=%s AND question_id=%s",
 
-
-
                               (sid, b.question_id),
 
-
-
                     ).fetchone()
-
-
 
                     if not assigned:
 
-
-
                               raise HTTPException(400, "Question does not belong to this exam")
-
-
 
                     q = c.execute(
 
-
-
                               "SELECT correct_answer FROM questions WHERE id=%s", (b.question_id,)
 
-
-
                     ).fetchone()
-
-
 
                     if c.execute(
 
-
-
                               "SELECT 1 FROM responses WHERE session_id=%s AND question_id=%s",
-
-
 
                               (sid, b.question_id),
 
-
-
                     ).fetchone():
-
-
 
                               raise HTTPException(409, "Already answered")
 
-
-
                     correct = b.answer == q["correct_answer"]
 
-
-
                     c.execute(
-
-
 
                               "INSERT INTO responses(session_id,question_id,selected_answer,is_correct) VALUES (%s,%s,%s,%s)",
 
-
-
                               (sid, b.question_id, b.answer, correct),
-
-
 
                     )
 
-
-
                     c.commit()
-
-
 
           return {"submitted": True, "correct": correct,
 
-
-
                               "message": "Saved. Answer key is hidden until review."}
-
-
 
 @app.post("/exams/{sid}/finish")
 
-
-
 def finish(sid: str):
-
-
 
           with get_connection() as c:
 
-
-
                     session = c.execute(
-
-
 
                               "SELECT * FROM exam_sessions WHERE id=%s", (sid,)
 
-
-
                     ).fetchone()
-
-
 
                     if not session:
 
-
-
                               raise HTTPException(404, "Exam session not found")
-
-
 
                     c.execute(
 
-
-
                               "UPDATE exam_sessions SET status='completed',ended_at=NOW() WHERE id=%s AND status='active'",
 
-
-
                               (sid,),
-
-
 
                     )
 
-
-
                     total = c.execute(
-
-
 
                               "SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE is_correct) AS correct, COALESCE(AVG(is_correct::int),0) AS acc FROM responses WHERE session_id=%s",
 
-
-
                               (sid,),
-
-
 
                     ).fetchone()
 
-
-
                     topics = c.execute(
-
-
 
                               """SELECT q.topic, COUNT(*) AS attempted,
 
-
-
                               COUNT(*) FILTER (WHERE r.is_correct) AS correct,
-
-
 
                               ROUND(100.0*AVG(r.is_correct::int),1) AS accuracy_percent
 
-
-
                               FROM responses r JOIN questions q ON q.id=r.question_id
-
-
 
                               WHERE r.session_id=%s GROUP BY q.topic ORDER BY accuracy_percent""",
 
-
-
                               (sid,),
 
-
-
                     ).fetchall()
-
-
 
                     review = c.execute(
 
-
-
                               """SELECT q.question_text,q.correct_answer,q.explanation,
-
-
 
                               r.selected_answer,r.is_correct,q.topic,q.difficulty
 
-
-
                               FROM responses r JOIN questions q ON q.id=r.question_id
-
-
 
                               WHERE r.session_id=%s ORDER BY r.answered_at""",
 
-
-
                               (sid,),
-
-
 
                     ).fetchall()
 
-
-
                     c.commit()
-
-
 
           return {
 
-
-
                     "status": "completed", "attempted": total["n"], "correct": total["correct"],
-
-
 
                     "accuracy_percent": round(float(total["acc"]) * 100, 1),
 
-
-
                     "topic_analysis": topics,
-
-
 
                     "weak_topics": [t["topic"] for t in topics if float(t["accuracy_percent"] or 0) < 60],
 
-
-
                     "answer_review": review,
 
-
-
           }
-
-
 
 @app.post("/questions/generate")
 def generate(b: GenerateBody):
@@ -1218,7 +701,6 @@ def generate(b: GenerateBody):
     except Exception as exc:
         raise HTTPException(502, f"Question generation failed: {exc}")
 
-
 @app.get("/topics")
 
 def get_topics():
@@ -1236,8 +718,6 @@ def get_topics():
                     except Exception as exc:
 
                               print(f"Could not recover missing topics: {exc}")
-
-
 
                     with get_connection() as c:
 
@@ -1259,17 +739,11 @@ def get_topics():
 
                               ).fetchall()
 
-
-
                     from pathlib import Path
-
-
 
                     grouped_subjects = {}
 
                     topic_items = []
-
-
 
                     for row in rows:
 
@@ -1279,15 +753,11 @@ def get_topics():
 
                               topic_name = row["topic"]
 
-
-
                               grouped_subjects.setdefault(subject_name, [])
 
                               if topic_name not in grouped_subjects[subject_name]:
 
                                         grouped_subjects[subject_name].append(topic_name)
-
-
 
                               topic_items.append({
 
@@ -1298,8 +768,6 @@ def get_topics():
                                         "filename": filename,
 
                               })
-
-
 
                     subjects = [
 
@@ -1315,105 +783,75 @@ def get_topics():
 
                     ]
 
-
-
                     return {"subjects": subjects, "topics": topic_items}
-
-
 
           except Exception as exc:
 
                     raise HTTPException(500, f"Could not load topics: {exc}")
 
-
-
 @app.post("/documents/upload")
-
-
-
 async def upload(file: UploadFile = File(...)):
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Upload a PDF")
 
+    raw = await file.read()
+    if len(raw) > 20 * 1024 * 1024:
+        raise HTTPException(413, "PDF exceeds 20 MB")
 
-
-          if not file.filename or not file.filename.lower().endswith(".pdf"):
-
-
-
-                    raise HTTPException(400, "Upload a PDF")
-
-
-
-          raw = await file.read()
-
-
-
-          if len(raw) > 20 * 1024 * 1024:
-
-
-
-                    raise HTTPException(413, "PDF exceeds 20 MB")
-
-
-
-          try:
-
-
-
-                    return ingest_pdf(file.filename, raw)
-
-
-
-          except Exception as exc:
-
-
-
-                    raise HTTPException(400, f"PDF processing failed: {exc}")
-
+    blob_name = f"uploads/{uuid4().hex}.pdf"
+    container = None
+    try:
+        container = get_blob_container()
+        container.upload_blob(
+            name=blob_name,
+            data=raw,
+            overwrite=False,
+            content_settings=ContentSettings(content_type="application/pdf"),
+        )
+        result = ingest_pdf(file.filename, raw)
+        # Return the blob identifier so it can be associated with the document later.
+        if isinstance(result, dict):
+            result["blob_name"] = blob_name
+            return result
+        return {"result": result, "blob_name": blob_name}
+    except (AzureError, RuntimeError) as exc:
+        raise HTTPException(
+            500,
+            "Could not upload PDF to Azure Blob Storage. Check managed identity and Blob permissions.",
+        ) from exc
+    except Exception as exc:
+        # Avoid leaving an orphaned blob when PDF ingestion fails.
+        if container is not None:
+            try:
+                container.delete_blob(blob_name)
+            except Exception:
+                pass
+        raise HTTPException(400, f"PDF processing failed: {exc}") from exc
 
 
 @app.post("/rag/ask")
 
-
-
 def ask(b: TutorBody):
-
-
 
           r = retrieve_context(b.question)
 
-
-
           return {
-
-
 
                     "answer": tutor_answer(b.question, r["context"]),
 
-
-
                     "sources": r["sources"],
-
-
 
                     "retrieval_status": r["status"],
 
-
-
                     "retrieval_message": r["message"],
 
-
-
           }
-
-
 
 class CreateConversationBody(BaseModel):
     title: str = Field(default="New chat", min_length=1, max_length=200)
 
-
 class SendChatMessageBody(BaseModel):
     question: str = Field(min_length=1, max_length=12000)
-
 
 @app.get("/chat/conversations")
 def list_chat_conversations(request: Request):
@@ -1441,7 +879,6 @@ def list_chat_conversations(request: Request):
         ]
     }
 
-
 @app.post("/chat/conversations")
 def create_chat_conversation(body: CreateConversationBody, request: Request):
     user_id = UUID(request.state.user["id"])
@@ -1457,7 +894,6 @@ def create_chat_conversation(body: CreateConversationBody, request: Request):
         )
         connection.commit()
     return {"id": str(conversation_id), "title": title, "messages": []}
-
 
 @app.get("/chat/conversations/{conversation_id}/messages")
 def get_chat_messages(conversation_id: str, request: Request):
@@ -1495,7 +931,6 @@ def get_chat_messages(conversation_id: str, request: Request):
             for row in rows
         ]
     }
-
 
 @app.post("/chat/conversations/{conversation_id}/messages")
 def send_chat_message(conversation_id: str, body: SendChatMessageBody, request: Request):
@@ -1578,7 +1013,6 @@ def send_chat_message(conversation_id: str, body: SendChatMessageBody, request: 
         "retrieval_message": retrieval.get("message"),
     }
 
-
 class SaveTestAttemptBody(BaseModel):
 
           subject: str = Field(min_length=1, max_length=150)
@@ -1593,8 +1027,6 @@ class SaveTestAttemptBody(BaseModel):
 
           topics_practiced: list[str] = Field(default_factory=list, max_length=200)
 
-
-
 @app.post("/dashboard/attempts")
 
 def save_test_attempt(body: SaveTestAttemptBody, request: Request):
@@ -1604,8 +1036,6 @@ def save_test_attempt(body: SaveTestAttemptBody, request: Request):
           if body.correct_answers > body.total_questions:
 
                     raise HTTPException(422, "Correct answers cannot exceed total questions")
-
-
 
           accuracy = round(100.0 * body.correct_answers / body.total_questions, 2)
 
@@ -1618,8 +1048,6 @@ def save_test_attempt(body: SaveTestAttemptBody, request: Request):
           if body.topic and body.topic.strip():
 
                     topics = list(dict.fromkeys([*topics, body.topic.strip()]))
-
-
 
           attempt_id = uuid4()
 
@@ -1653,8 +1081,6 @@ def save_test_attempt(body: SaveTestAttemptBody, request: Request):
 
                     connection.commit()
 
-
-
           return {
 
                     "saved": True,
@@ -1664,8 +1090,6 @@ def save_test_attempt(body: SaveTestAttemptBody, request: Request):
                     "accuracy_percent": accuracy,
 
           }
-
-
 
 @app.get("/dashboard/summary")
 
@@ -1705,8 +1129,6 @@ def dashboard_summary(request: Request):
 
                     ).fetchone()
 
-
-
           return {
 
                     "average_accuracy": float(stats["average_accuracy"]),
@@ -1718,8 +1140,6 @@ def dashboard_summary(request: Request):
                     "study_time_minutes": int(stats["study_time_seconds"]) // 60,
 
           }
-
-
 
 @app.get("/dashboard/history")
 
@@ -1748,8 +1168,6 @@ def dashboard_history(request: Request):
                               (user_id,),
 
                     ).fetchall()
-
-
 
           return {"tests": [
 
