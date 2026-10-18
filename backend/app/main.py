@@ -173,94 +173,63 @@ class LoginBody(BaseModel):
 async def root(request: Request):
 
           return {"message": "Hello World"}
+# Keep frontend origins in one place. Origins must match the browser Origin exactly,
+# so do not include a trailing slash.
+ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://adaptivelearning-psi.vercel.app",
+    "https://adaptivelearning-b7qv2s0ji.vercel.app",
+    "https://agreeable-bush-05a1ee100.2.azurestaticapps.net",
+]
+
+
 @app.middleware("http")
-
 async def require_jwt_for_application_routes(request: Request, call_next):
+    # CORS preflight requests must pass through without authentication.
+    if request.method == "OPTIONS":
+        return await call_next(request)
 
-          path = request.url.path
+    path = request.url.path
+    public_paths = {"/", "/health", "/auth/signup", "/auth/login", "/openapi.json"}
 
-          public_paths = {"/health", "/auth/signup", "/auth/login", "/openapi.json"}
+    if (
+        path in public_paths
+        or path.startswith("/docs")
+        or path.startswith("/redoc")
+    ):
+        return await call_next(request)
 
-          if (request.method == "OPTIONS" or path in public_paths or
+    try:
+        request.state.user = current_user_from_request(request)
+    except HTTPException as exc:
+        from starlette.responses import JSONResponse
 
-                    path.startswith("/docs") or path.startswith("/redoc")):
+        response = JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        # CORSMiddleware should add CORS headers. Keep this fallback consistent
+        # for authentication-error responses returned by this middleware.
+        origin = request.headers.get("origin")
+        if origin in ALLOWED_ORIGINS:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Vary"] = "Origin"
+        return response
 
-                    return await call_next(request)
+    return await call_next(request)
 
-          try:
-
-                    request.state.user = current_user_from_request(request)
-
-          except HTTPException as exc:
-
-                    from starlette.responses import JSONResponse
-
-                    response = JSONResponse(
-
-                              status_code=exc.status_code,
-
-                              content={"detail": exc.detail},
-
-                              headers={"WWW-Authenticate": "Bearer"},
-
-                    )
-
-                    origin = request.headers.get("origin")
-
-                    allowed_origins = {
-
-                              "http://localhost:5173",
-
-                              "http://127.0.0.1:5173",
-
-                              "https://adaptivelearning-psi.vercel.app",
-
-                              "https://adaptivelearning-b7qv2s0ji.vercel.app/",
-
-                              "https://agreeable-bush-05a1ee100.2.azurestaticapps.net/"
-
-                    }
-
-                    if origin in allowed_origins:
-
-                              response.headers["Access-Control-Allow-Origin"] = origin
-
-                              response.headers["Access-Control-Allow-Credentials"] = "true"
-
-                              response.headers["Vary"] = "Origin"
-
-                    return response
-
-          return await call_next(request)
 
 # Register CORS after the custom HTTP middleware so CORS wraps its responses,
-
 # including authentication errors returned as JSONResponse.
-
 app.add_middleware(
-
-          CORSMiddleware,
-
-          allow_origins=[
-
-                    "http://localhost:5173",
-
-                    "http://127.0.0.1:5173",
-
-                    "https://adaptivelearning-psi.vercel.app",
-
-                    "https://adaptivelearning-b7qv2s0ji.vercel.app/",
-
-                    "https://agreeable-bush-05a1ee100.2.azurestaticapps.net/"
-
-          ],
-
-          allow_credentials=True,
-
-          allow_methods=["*"],
-
-          allow_headers=["*"],
-
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 @app.post("/auth/signup")
