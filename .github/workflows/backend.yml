@@ -58,13 +58,21 @@ jobs:
           docker push "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest"
 
 
+      
       - name: Configure Azure Web App to use the new image
-        run: |
-          az webapp config container set \\
-            --name "${{ secrets.AZURE_WEBAPP_NAME }}" \\
-            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \\
-            --docker-custom-image-name "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" \\
-            --docker-registry-server-url "https://${{ secrets.ACR_LOGIN_SERVER }}"
+        run: >
+          az webapp config container set
+          --name "${{ secrets.AZURE_WEBAPP_NAME }}"
+          --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}"
+          --docker-custom-image-name "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          --docker-registry-server-url "https://${{ secrets.ACR_LOGIN_SERVER }}"
+
+      - name: Restart Azure Web App
+        run: >
+          az webapp restart
+          --name "${{ secrets.AZURE_WEBAPP_NAME }}"
+          --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}"
+
 
       - name: Restart Azure Web App
         run: |
