@@ -31,8 +31,19 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
           
+      
       - name: Sign in to Azure Container Registry
-        run: az acr login --name "${{ secrets.ACR_NAME }}"
+        run: |
+          ACR_TOKEN=$(az acr login \
+            --name "${{ secrets.ACR_NAME }}" \
+            --expose-token \
+            --query accessToken \
+            --output tsv)
+
+          echo "$ACR_TOKEN" | docker login \
+            "${{ secrets.ACR_LOGIN_SERVER }}" \
+            --username 00000000-0000-0000-0000-000000000000 \
+            --password-stdin
 
       
       - name: Build and push backend Docker image
