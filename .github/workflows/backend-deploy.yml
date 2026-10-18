@@ -1,0 +1,53 @@
+name: Build and Deploy FastAPI Backend to Azure
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/**"
+      - ".github/workflows/deploy-backemd.yml"
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: adaptive-learning-backend
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Sign in to Azure Container Registry
+        run: az acr login --name "${{ secrets.ACR_NAME }}"
+
+      - name: Build and push backend Docker image
+        run: |
+          docker build \\
+            -f backend/Dockerfile \\
+            -t "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" \\
+            -t "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest" \\
+            backend
+          docker push "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          docker push "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest"
+
+      - name: Configure Azure Web App to use the new image
+        run: |
+          az webapp config container set \\
+            --name "${{ secrets.AZURE_WEBAPP_NAME }}" \\
+            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \\
+            --docker-custom-image-name "${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" \\
+            --docker-registry-server-url "https://${{ secrets.ACR_LOGIN_SERVER }}"
+
+      - name: Restart Azure Web App
+        run: |
+          az webapp restart \\
+            --name "${{ secrets.AZURE_WEBAPP_NAME }}" \\
+            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}"
